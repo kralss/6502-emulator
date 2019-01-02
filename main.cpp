@@ -69,6 +69,14 @@ class vm_c
         return get_bit(status, 7);
     }
 
+    void set_break_command(bool x) {
+        set_bit(status, 4, x);
+    }
+
+    bool get_break_command() {
+        return get_bit(status, 4);
+    }
+
     void set_with_flags(char& u, char v) {
         u = v;
         set_zero_flag(u == 0);
@@ -306,6 +314,11 @@ class vm_c
         push(s);
     }
 
+    void push_pc() {
+        push(char(pc >> 8));
+        push(char(pc));
+    }
+
     void pull_accumulator() {
         set_with_flags(ra, pull());
     }
@@ -323,8 +336,7 @@ class vm_c
 
     void jump_to_subroutine() {
         pc -= 3;
-        push(char(pc >> 8));
-        push(char(pc));
+        push_pc();
         pc = arg - &memory[0];
     }
 
@@ -458,7 +470,10 @@ class vm_c
     }
 
     void force_interrupt() {
-        std::cout << "warning : brk is not supported\n";
+        push_pc();
+        push_status();
+        pc = make_addr(memory[0xffff], memory[0xfffe]);
+        set_break_command(1);
     }
 
     void return_from_interrupt() {
@@ -494,7 +509,7 @@ public:
         ra = 0;
         rx = 0;
         ry = 0;
-        status = 0;
+        status = 0x24;
 
         std::fill(fetch_arg, fetch_arg + 0x100u, &vm_c::implicit);
         std::fill(command, command + 0x100u, &vm_c::undefined);
