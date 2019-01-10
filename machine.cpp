@@ -8,8 +8,15 @@
 #include "machine.hpp"
 #include "misc.hpp"
 
-t_addr make_addr(char a, char b) {
-    return (t_addr(a) << 8) | b;
+t_addr make_addr(char hi, char lo) {
+    return (t_addr(hi) << 8) | lo;
+}
+
+void add_with_carry(char& x, char y, bool& c) {
+    unsigned z = x;
+    z += y;
+    c = (z >= 0x100u);
+    x = z;
 }
 
 const t_addr addr_ra = 0x10000;
@@ -18,12 +25,47 @@ const t_addr addr_ry = 0x10002;
 const t_addr addr_rp = 0x10003;
 const t_addr addr_sp = 0x10004;
 
+void t_machine::process_interrupt() {
+    if (nmi_flag == 1) {
+        nmi_flag = 0;
+        push_addr(pc);
+        auto val = rp;
+        set_bit(val, 5, 1);
+        set_bit(val, 4, 0);
+        push(val);
+        set_interrupt_disable_flag(1);
+        pc = read_mem_2(0xfffa);
+    }
+    if (reset_flag == 1) {
+        reset_flag = 0;
+        set_interrupt_disable_flag(1);
+        pc = read_mem_2(0xfffc);
+    } else if (irq_flag == 1) {
+        irq_flag = 0;
+        push_addr(pc);
+        auto val = rp;
+        set_bit(val, 5, 1);
+        set_bit(val, 4, 0);
+        push(val);
+        set_interrupt_disable_flag(1);
+        pc = read_mem_2(0xfffe);
+    }
+}
+
 int t_machine::step() {
+    auto idf = get_interrupt_disable_flag();
+    if (nmi_flag || (idf == 0 && (reset_flag || irq_flag))) {
+        process_interrupt();
+        step_count++;
+        return 0;
+    }
+
     // fetch an instruction
     auto opcode = read_mem(pc);
     pc++;
 
     // execute the given instruction
+    cyc = 0;
     switch (opcode) {
     case 0x29: m_imm(); i_and(); break;
     case 0x25: m_zpg(); i_and(); break;
@@ -206,137 +248,200 @@ int t_machine::step() {
     default:
         return -1;
     }
+
+    step_count++;
     return 0;
 }
 
 void t_machine::m_imp() {
+    rcyc = 0;
+    wcyc = 0;
 }
 
 void t_machine::m_acc() {
+    rcyc = 0;
+    wcyc = 0;
     set_arg(addr_ra, 0);
 }
 
 void t_machine::m_imm() {
+    rcyc = 0;
+    wcyc = 0;
     set_arg(pc, 1);
 }
 
 void t_machine::m_rel() {
     set_arg(pc, 1);
+    rcyc = 0;
+    wcyc = 0;
 }
 
 void t_machine::m_zpg() {
+    rcyc = 1;
+    wcyc = 1;
     set_arg(read_mem(pc), 1);
 }
 
 void t_machine::m_zpx() {
+    rcyc = 2;
+    wcyc = 2;
     set_arg(char(read_mem(pc) + rx), 1);
 }
 
 void t_machine::m_zpy() {
+    rcyc = 2;
+    wcyc = 2;
     set_arg(char(read_mem(pc) + ry), 1);
 }
 
 void t_machine::m_abs() {
+    rcyc = 2;
+    wcyc = 2;
     set_arg(read_mem_2(pc), 2);
 }
 
 void t_machine::m_abx() {
-    set_arg(read_mem_2(pc) + rx, 2);
+    auto lo = read_mem(pc);
+    auto hi = read_mem(pc + 1);
+    bool carry;
+    add_with_carry(lo, rx, carry);
+    hi += carry;
+    set_arg(make_addr(hi, lo), 2);
+    rcyc = 2 + carry;
+    wcyc = 3;
 }
 
 void t_machine::m_aby() {
-    set_arg(read_mem_2(pc) + ry, 2);
+    auto lo = read_mem(pc);
+    auto hi = read_mem(pc + 1);
+    bool carry;
+    add_with_carry(lo, ry, carry);
+    hi += carry;
+    set_arg(make_addr(hi, lo), 2);
+    rcyc = 2 + carry;
+    wcyc = 3;
 }
 
 void t_machine::m_ind() {
     set_arg(read_mem_2(read_mem_2(pc)), 2);
+    rcyc = 4;
 }
 
 void t_machine::m_inx() {
-    set_arg(read_mem_2(read_mem(pc) + rx), 1);
+    rcyc = 4;
+    wcyc = 4;
+    set_arg(read_mem_2(char(read_mem(pc) + rx)), 1);
 }
 
 void t_machine::m_iny() {
-    set_arg(read_mem_2(read_mem(pc)) + ry, 1);
+    auto addr = read_mem(pc);
+    auto lo = read_mem(addr);
+    addr++;
+    auto hi = read_mem(addr);
+    bool carry;
+    add_with_carry(lo, ry, carry);
+    hi += carry;
+    set_arg(make_addr(hi, lo), 1);
+    rcyc = 3 + carry;
+    wcyc = 4;
 }
 
 void t_machine::i_lda() {
     set_with_flags(addr_ra, read_mem(arg));
+    cyc += 2 + rcyc;
 }
 
 void t_machine::i_ldx() {
     set_with_flags(addr_rx, read_mem(arg));
+    cyc += 2 + rcyc;
 }
 
 void t_machine::i_ldy() {
     set_with_flags(addr_ry, read_mem(arg));
+    cyc += 2 + rcyc;
 }
 
 void t_machine::i_sta() {
     write_mem(arg, ra);
+    cyc += 2 + wcyc;
 }
 
 void t_machine::i_stx() {
     write_mem(arg, rx);
+    cyc += 2 + rcyc;
 }
 
 void t_machine::i_sty() {
     write_mem(arg, ry);
+    cyc += 2 + rcyc;
 }
 
 void t_machine::i_tax() {
     set_with_flags(addr_rx, ra);
+    cyc += 2;
 }
 
 void t_machine::i_tay() {
     set_with_flags(addr_ry, ra);
+    cyc += 2;
 }
 
 void t_machine::i_txa() {
     set_with_flags(addr_ra, rx);
+    cyc += 2;
 }
 
 void t_machine::i_tya() {
     set_with_flags(addr_ra, ry);
+    cyc += 2;
 }
 
 void t_machine::i_tsx() {
     set_with_flags(addr_rx, sp);
+    cyc += 2;
 }
 
 void t_machine::i_txs() {
     sp = rx;
+    cyc += 2;
 }
 
 void t_machine::i_pha() {
     push(ra);
+    cyc += 3;
 }
 
 void t_machine::i_pla() {
     set_with_flags(addr_ra, pull());
+    cyc += 4;
 }
 
 void t_machine::i_php() {
-    auto tmp = rp;
-    set_bit(tmp, 5, 1);
-    set_bit(tmp, 4, 1);
-    push(tmp);
+    auto val = rp;
+    set_bit(val, 5, 1);
+    set_bit(val, 4, 1);
+    push(val);
+    cyc += 3;
 }
 
 void t_machine::i_plp() {
     rp = pull();
+    cyc += 4;
 }
 
 void t_machine::i_and() {
     set_with_flags(addr_ra, ra & read_mem(arg));
+    cyc += 2 + rcyc;
 }
 
 void t_machine::i_eor() {
     set_with_flags(addr_ra, ra ^ read_mem(arg));
+    cyc += 2 + rcyc;
 }
 
 void t_machine::i_ora() {
     set_with_flags(addr_ra, ra | read_mem(arg));
+    cyc += 2 + rcyc;
 }
 
 void t_machine::i_bit() {
@@ -344,70 +449,88 @@ void t_machine::i_bit() {
     set_zero_flag((ra & val) == 0);
     set_overflow_flag(get_bit(val, 6));
     set_negative_flag(get_bit(val, 7));
+    cyc += 2 + rcyc;
 };
 
 void t_machine::i_inc() {
     set_with_flags(arg, read_mem(arg) + 1);
+    cyc += 4 + wcyc;
 }
 
 void t_machine::i_dec() {
     set_with_flags(arg, read_mem(arg) - 1);
+    cyc += 4 + wcyc;
 }
 
 void t_machine::i_inx() {
     set_with_flags(addr_rx, rx + 1);
+    cyc += 2;
 }
 
 void t_machine::i_dex() {
     set_with_flags(addr_rx, rx - 1);
+    cyc += 2;
 }
 
 void t_machine::i_iny() {
     set_with_flags(addr_ry, ry + 1);
+    cyc += 2;
 }
 
 void t_machine::i_dey() {
     set_with_flags(addr_ry, ry - 1);
+    cyc += 2;
 }
 
 void t_machine::i_jmp() {
     pc = arg;
+    cyc += 1 + rcyc;
 }
 
 void t_machine::i_jsr() {
-    push_pc(); pc = arg;
+    push_addr(pc - 1);
+    pc = arg;
+    cyc += 4 + rcyc;
 }
 
 void t_machine::i_rts() {
-    pull_pc();
+    pc = pull_addr() + 1;
+    cyc += 6;
 }
 
 void t_machine::i_clc() {
     set_carry_flag(0);
+    cyc += 2;
 }
 
 void t_machine::i_sec() {
     set_carry_flag(1);
+    cyc += 2;
 }
 
 void t_machine::i_clv() {
     set_overflow_flag(0);
+    cyc += 2;
 }
 
 void t_machine::i_cld() {
     set_bit(rp, 3, 0);
+    cyc += 2;
 }
 
 void t_machine::i_sed() {
     set_bit(rp, 3, 1);
+    cyc += 2;
 }
 
 void t_machine::i_cli() {
     set_bit(rp, 2, 0);
+    cyc += 2;
 }
 
 void t_machine::i_sei() {
     set_bit(rp, 2, 1);
+    cyc += 2;
 }
 
 void t_machine::i_bcc() {
@@ -443,33 +566,39 @@ void t_machine::i_bvs() {
 }
 
 void t_machine::i_brk() {
-    push_pc();
+    push_addr(pc + 1);
     auto val = rp;
     set_bit(val, 5, 1);
     set_bit(val, 4, 1);
     push(val);
     pc = read_mem_2(0xfffe);
     set_break_flag(1);
+    set_interrupt_disable_flag(1);
+    cyc += 7;
 }
 
 void t_machine::i_rti() {
     rp = pull();
-    pull_pc();
+    pc = pull_addr();
+    cyc += 6;
 }
 
 void t_machine::i_nop() {
+    cyc += 2;
 }
 
 void t_machine::i_asl() {
     auto val = read_mem(arg);
     set_carry_flag(get_bit(val, 7));
     set_with_flags(arg, val << 1);
+    cyc += (arg == addr_ra) ? 2 : (4 + wcyc);
 }
 
 void t_machine::i_lsr() {
     auto val = read_mem(arg);
     set_carry_flag(get_bit(val, 0));
     set_with_flags(arg, val >> 1);
+    cyc += (arg == addr_ra) ? 2 : (4 + wcyc);
 }
 
 void t_machine::i_rol() {
@@ -479,6 +608,7 @@ void t_machine::i_rol() {
     val <<= 1;
     set_bit(val, 0, ca);
     set_with_flags(arg, val);
+    cyc += (arg == addr_ra) ? 2 : (4 + wcyc);
 }
 
 void t_machine::i_ror() {
@@ -488,32 +618,45 @@ void t_machine::i_ror() {
     val >>= 1;
     set_bit(val, 7, ca);
     set_with_flags(arg, val);
+    cyc += (arg == addr_ra) ? 2 : (4 + wcyc);
 }
 
 void t_machine::i_adc() {
     unsigned res = ra;
     unsigned v = read_mem(arg);
-    v += get_carry_flag();
+    auto ca = get_carry_flag();
+    v += ca;
     auto a7 = get_bit(ra, 7);
     auto b7 = get_bit(v, 7);
     res += v;
     set_with_flags(addr_ra, res);
     auto c7 = get_bit(ra, 7);
-    set_overflow_flag(a7 == b7 && a7 != c7);
-    set_carry_flag(res >= 0x100);
+    if (ca == 1 && v == 0x80u) {
+        set_overflow_flag(a7 == 0);
+    } else {
+        set_overflow_flag(a7 == b7 && a7 != c7);
+    }
+    set_carry_flag(res >= 0x100u);
+    cyc += 2 + rcyc;
 }
 
 void t_machine::i_sbc() {
     unsigned res = ra;
     unsigned xx = read_mem(arg);
-    xx += !get_carry_flag();
+    auto nc = !get_carry_flag();
+    xx += nc;
     auto a7 = get_bit(ra, 7);
     auto b7 = get_bit(xx, 7);
     res -= xx;
     set_with_flags(addr_ra, res);
     auto c7 = get_bit(ra, 7);
-    set_overflow_flag(a7 != b7 && b7 == c7);
+    if (nc == 1 && xx == 0x80u) {
+        set_overflow_flag(a7 == 1);
+    } else {
+        set_overflow_flag(a7 != b7 && b7 == c7);
+    }
     set_carry_flag(res < 0x100);
+    cyc += 2 + rcyc;
 }
 
 void t_machine::i_cmp() {
@@ -521,6 +664,7 @@ void t_machine::i_cmp() {
     set_carry_flag(ra >= val);
     set_zero_flag(ra == val);
     set_negative_flag(get_bit(ra - val, 7));
+    cyc += 2 + rcyc;
 }
 
 void t_machine::i_cpx() {
@@ -528,6 +672,7 @@ void t_machine::i_cpx() {
     set_carry_flag(rx >= val);
     set_zero_flag(rx == val);
     set_negative_flag(get_bit(rx - val, 7));
+    cyc += 2 + rcyc;
 }
 
 void t_machine::i_cpy() {
@@ -535,6 +680,7 @@ void t_machine::i_cpy() {
     set_carry_flag(ry >= val);
     set_zero_flag(ry == val);
     set_negative_flag(get_bit(ry - val, 7));
+    cyc += 2 + rcyc;
 }
 
 void t_machine::run() {
@@ -591,6 +737,7 @@ void t_machine::set_with_flags(t_addr addr, char v) {
 }
 
 void t_machine::push(char val) {
+    // std::cout << "push "; print_hex(val); std::cout << "\n";
     write_mem(0x100u + sp, val);
     sp--;
 }
@@ -600,24 +747,32 @@ char t_machine::pull() {
     return read_mem(0x100u + sp);
 }
 
-void t_machine::push_pc() {
-    push(char(pc >> 8));
-    push(char(pc));
+void t_machine::push_addr(t_addr addr) {
+    push(char(addr >> 8));
+    push(char(addr));
 }
 
-void t_machine::pull_pc() {
+t_addr t_machine::pull_addr() {
     auto v = pull();
     auto u = pull();
-    pc = make_addr(u, v);
+    return make_addr(u, v);
 }
 
 void t_machine::short_jump_if(bool cond) {
+    cyc += 2;
     if (cond) {
+        cyc++;
         auto offset = read_mem(arg);
+        char old_page = pc >> 8;
         if (offset < 0x80u) {
             pc += offset;
         } else {
-            pc -= ~offset + 1;
+            offset = ~offset;
+            pc -= offset + 1u;
+        }
+        char new_page = pc >> 8;
+        if (new_page != old_page) {
+            cyc++;
         }
     }
 }
@@ -641,6 +796,14 @@ void t_machine::set_zero_flag(bool x) {
 
 bool t_machine::get_zero_flag() {
     return get_bit(rp, 1);
+}
+
+void t_machine::set_interrupt_disable_flag(bool x) {
+    set_bit(rp, 2, x);
+}
+
+bool t_machine::get_interrupt_disable_flag() {
+    return get_bit(rp, 2);
 }
 
 void t_machine::set_overflow_flag(bool x) {
@@ -671,6 +834,10 @@ t_addr t_machine::get_program_counter() {
     return pc;
 }
 
+void t_machine::set_program_counter(t_addr addr) {
+    pc = addr;
+}
+
 int t_machine::load_program_from_file(const std::string& file, t_addr addr) {
     std::ifstream input(file, std::ios::binary);
     if (!input.good()) {
@@ -690,7 +857,22 @@ char t_machine::read_memory(t_addr addr) {
     return read_mem(addr);
 }
 
-void t_machine::reset() {
+void t_machine::print_info() {
+    std::cout << "| a : "; print_hex(ra);
+    std::cout << " | x : "; print_hex(rx);
+    std::cout << " | y : "; print_hex(ry);
+    std::cout << " | sp : "; print_hex(sp);
+    std::cout << " | pc : "; print_hex(pc);
+    std::cout << " | p : "; print_hex(rp);
+    std::cout << " | sc : "; print_hex(step_count);
+    std::cout << " |\n";
+}
+
+unsigned long t_machine::get_step_counter() {
+    return step_count;
+}
+
+void t_machine::init() {
     pc = 0x0200;
     sp = 0xff;
     ra = 0x00;
@@ -698,8 +880,12 @@ void t_machine::reset() {
     ry = 0x00;
     rp = 0x24;
     std::fill(memory.begin(), memory.end(), 0xff);
+    nmi_flag = 0;
+    irq_flag = 0;
+    reset_flag = 0;
+    step_count = 0;
 }
 
 t_machine::t_machine() {
-    reset();
+    init();
 }

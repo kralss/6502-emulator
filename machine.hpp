@@ -5,9 +5,17 @@
 
 using t_addr = unsigned long;
 
-class t_machine
-{
+class t_machine {
     t_addr arg;
+    unsigned long cyc;
+    unsigned rcyc;
+    unsigned wcyc;
+    unsigned long step_count;
+
+    bool reset_flag;
+    bool nmi_flag;
+    bool irq_flag;
+
     std::array<char, 0x10000> memory;
 
     // registers
@@ -115,6 +123,8 @@ class t_machine
     bool get_overflow_flag();
     void set_negative_flag(bool);
     bool get_negative_flag();
+    void set_interrupt_disable_flag(bool);
+    bool get_interrupt_disable_flag();
     void set_break_flag(bool);
     bool get_break_flag();
 
@@ -125,18 +135,23 @@ class t_machine
     void set_arg(t_addr, int);
     void push(char);
     char pull();
-    void push_pc();
-    void pull_pc();
+    void push_addr(t_addr);
+    t_addr pull_addr();
     void short_jump_if(bool);
 
 public:
 
     t_machine();
-    void reset();
+    void init();
     t_addr get_program_counter();
+    unsigned long get_step_counter();
+    void print_info();
+    void set_program_counter(t_addr);
     char read_memory(t_addr);
     void load_program(const std::vector<char>&, t_addr);
     int load_program_from_file(const std::string&, t_addr);
+    void interrupt_reset();
+    void process_interrupt();
     int step();
     void run();
 };

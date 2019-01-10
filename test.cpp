@@ -13,7 +13,7 @@ static int total_count;
 
 static void tst(const std::string& label, const std::vector<char>& prog) {
     std::cout << "test : " << label << "\n";
-    mach.reset();
+    mach.init();
     mach.load_program(prog, 0x200);
     mach.run();
 }
@@ -203,9 +203,9 @@ void modular_test() {
 }
 
 void full_test() {
-    mach.reset();
+    mach.init();
     mach.load_program_from_file("test.bin", 0x4000);
-    while (mach.get_program_counter() != 0x45c0) {
+    while (mach.get_program_counter() != 0x45c0u) {
         mach.step();
     }
     auto answer = mach.read_memory(0x0210);
@@ -214,5 +214,31 @@ void full_test() {
         std::cout << "full test pass\n";
     } else {
         std::cout << "full test fail\n";
+    }
+}
+
+void func_test() {
+    mach.init();
+    auto ret = mach.load_program_from_file("func_test_no_dec.bin", 0x0000);
+    if (ret < 0) {
+        std::cout << "load program fail\n";
+        return;
+    }
+    mach.set_program_counter(0x0400);
+    while (true) {
+        auto pc = mach.get_program_counter();
+        auto sc = mach.get_step_counter();
+        if (pc == 0x3469ul) {
+            std::cout << "success\n";
+            break;
+        }
+        if (sc % 0x1000u == 0) {
+            mach.print_info();
+        }
+        auto ret = mach.step();
+        if (ret < 0) {
+            std::cout << "bad instruction\n";
+            break;
+        }
     }
 }
